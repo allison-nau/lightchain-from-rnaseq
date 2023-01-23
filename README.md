@@ -14,6 +14,7 @@ At the top of the script is a list of variables in "Global variables" that conta
 This script will download samples from dbGaP, downsamples file, trims off any remaining illumina adapters (adapter sequence file location needs to be specified in "adapt" in global variables), runs FastQC (on full file, downsampled file, and trimmed file), renames files to be provided to MiXCR, and then runs MiXCR.  
 Notes:  
 - Original file names will be used in FastQC results. All MiXCR results will be used following the new names.
+- Sequencing adapters to be trimmed off should be added to "pipeline/next_tru2_tru3.fa"
   
   
 ## To run the main post MiXCR processing steps that run quality control as well as identify the dominant plasma cell sequence, use the following script:
