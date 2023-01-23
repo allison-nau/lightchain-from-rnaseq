@@ -1,0 +1,458 @@
+#!/bin/bash -l
+set -vx
+
+# Script downloads sra files, unpacks to fastq, downsamples fastq files, runs FastQC at the applicable steps, renames files, and runs MiXCR
+# Script expects samples to be submitted as an array job, with the array index used to identify which sample(s) to run in "input_file"
+
+echo "Running download, extract, downsample, fastqc, adapter trimming, rename and MiXCR"
+echo "Running job $JOB_ID"
+echo "Started: $(date +%F)"
+echo "Current time: $(date +%T)"
+echo "Running in directory: $PWD"
+echo "Task ID: $SGE_TASK_ID"
+
+# #############################################################################################################################################################
+# Global variables - PLEASE CHECK ALL OF THESE BEFORE RUNNING
+# NGC key should be changed to user's ngc_key
+
+# Ngc key:
+# TODO: put in location of NGC key
+ngc_key=""
+
+# Directory where sra files are to be downloaded to:
+in_dir=sra/
+# Directory to output files, temporarily:
+outdir_temp=${TMPDIR}/800gmpr/
+# Final output directory:
+outdir=${in_dir}800MiXCR/
+
+# Sample input text file:
+input_file=runs1.txt
+
+# Number of threads (if less than 2, need to update FASTQC steps):
+threads_to_use=8
+# Downsample to:
+downsample_reads=5000000
+# Random seed to use for downsampling:
+dseed=144
+# Lines per read in fastq file:
+lines_read=4
+
+# Adapter file:
+adapt=pipeline/next_tru2_tru3.fa
+# Quality control trim? true/false:
+do_qc=false
+
+# MiXCR options text file:
+options_file=pipeline/mixcr_options.opt
+
+# Script locations:
+script_namelookup=pipeline/lookupname.py
+# Note: lookupname.py expects the name key to be located in "all_newids.csv"
+
+# #############################################################################################################################################################
+# Set up variables:
+
+# Create output directories:
+mkdir $outdir_temp
+mkdir $outdir
+echo "Temporary directory in scratch space: "${outdir_temp}
+echo "Final MiXCR output directory: "${outdir}
+
+# Read in sample names:
+readarray -t sample_names < $input_file
+
+# # Use the SGE_TASK_ID environment variable to select the appropriate input file from bash array
+# # Bash array index starts from 0, so we need to subtract one from SGE_TASK_ID value
+index=$(($SGE_TASK_ID-1))
+sample=${sample_names[$index]}
+
+# Filenames:
+# Original SRA filename (adjust based on what dbGaP project is being used):
+downloaded_name=${in_dir}${sample}"_dbGaP-28845.sra"
+# Change SRA filename to:
+taskinput=${in_dir}${sample}".sra"
+# Unpacked fastq filenames:
+fastq_out1=${outdir_temp}${sample}_1.fastq
+fastq_out2=${outdir_temp}${sample}_2.fastq
+# Downsampled fastq filenames:
+fastq_down1=${outdir_temp}${sample}_d_1.fastq
+fastq_down2=${outdir_temp}${sample}_d_2.fastq
+# Trimmed filenames:
+taskoutput1=${outdir_temp}${sample}"_aT_1.fastq"
+taskoutput2=${outdir_temp}${sample}"_aT_2.fastq"
+# Unpaired trimmed filenames:
+taskoutput1u=${outdir_temp}${sample}"_aT_1u.fastq"
+taskoutput2u=${outdir_temp}${sample}"_aT_2u.fastq"
+
+echo "Running accension: "${sample}
+echo "SRA input: ""${taskinput}"
+echo "Fastq output filenames:"
+echo $fastq_out1
+echo $fastq_out2
+
+# Loop up new name:
+module load python3/3.8.10
+new_name=$( python3 ${script_namelookup} ${sample})
+module unload python3
+# Files names after rename:
+renamed1=${outdir_temp}${new_name}_1.fastq
+renamed2=${outdir_temp}${new_name}_2.fastq
+echo "FASTQ filenames after rename will be:"
+echo $renamed1
+echo $renamed2
+
+# MiXCR clns file:
+mixcr_clns=${outdir}${new_name}".mix.BCR.contigs.clns"
+# MiXCR light chain files:
+mixcr_light_igk=${outdir}${new_name}".mix.BCR.clonotypes.IGK.txt"
+mixcr_light_igl=${outdir}${new_name}".mix.BCR.clonotypes.IGL.txt"
+
+# MiXCR variables:
+chains=(
+BCR
+)
+# Individual chains to look at:
+chainsB=(
+IGH
+IGK
+IGL
+)
+# MiXCR output:
+mixcr_output=${outdir}${new_name}".mix"
+
+echo "Before MiXCR, file name will be changed to: "${new_name}
+echo "Current time: $(date +%T)"
+
+# #############################################################################################################################################################
+# Download and unpack sra file
+
+# Make SRA tools available:
+module load sratoolkit/2.11.1
+# If not working, may need to set some directories in interactive area:
+# vdb-config -i
+# (currently the two temp file directories are in /projectnb/gmpr2/2021Summer/2021summer_ala_mm/annotate/data/fastqdumptemps
+# vdb-config --restore-defaults
+
+echo "Download sample: "${sample}
+# Use -p to show progress
+# Max download size: 50GB
+prefetch -p --max-size 50G --ngc ${ngc_key} ${sample}
+# Rename sample:
+mv ${downloaded_name} ${taskinput}
+echo "Current time: $(date +%T)"
+# Check if file exists:
+if [[ ! -f ${taskinput} ]] ; then
+    echo "File "${taskinput}" is not there, aborting."
+    exit 2
+fi
+
+echo "SRA file size:"
+stat --printf="%s \n" ${taskinput}
+echo "    "
+
+echo "Validate sample"
+echo "SRA: "${taskinput}
+# For verbose, include --verbose
+vdb-validate --ngc ${ngc_key} ${taskinput}
+echo "Current time: $(date +%T)"
+
+echo "Unpack fastq files from sra"
+# To see progress, include --progress
+fasterq-dump --progress --ngc ${ngc_key} --threads ${threads_to_use} --split-3 ${taskinput} -O ${outdir_temp} -t ${outdir_temp}
+echo "Current time: $(date +%T)"
+# Check if file exists:
+if [[ ! -f ${fastq_out1} ]] ; then
+    echo "File "${fastq_out1}" is not there, aborting."
+    exit 2
+elif [[ ! -f ${fastq_out2} ]] ; then
+    echo "File "${fastq_out2}" is not there, aborting."
+    exit 2
+fi
+
+# Unload sra toolkit:
+module unload sratoolkit
+
+echo "Filenames: "
+echo ${fastq_out1}
+echo ${fastq_out2}
+echo "Unpacked fastq file size:"
+stat --printf="%s \n" ${fastq_out1}
+echo "    "
+stat --printf="%s \n" ${fastq_out2}
+echo "    "
+echo "Lines in unpacked fastq:"
+wc -l ${fastq_out1}
+echo "    "
+wc -l ${fastq_out2}
+echo "    "
+# Expected reads based on number of lines:
+echo "Reads in unpacked fastq:"
+echo $(( $(wc -l < ${fastq_out1}) / ${lines_read} ))
+echo "    "
+echo $(( $(wc -l < ${fastq_out2}) / ${lines_read} ))
+echo "    "
+
+# Remove SRA files:
+rm ${taskinput}
+
+echo "Current time, after SRA downloaded and unpacked: $(date +%T)"
+
+# #############################################################################################################################################################
+# FASTQC full file:
+echo "Begin FastQC on full file"
+
+echo "Running FastQC on:"
+echo $fastq_out1
+echo $fastq_out2
+
+# Directory where fastq files are
+in_dir1=${outdir_temp}
+# Output directory:
+outdir1=${outdir}fastqc_full/
+mkdir -p $outdir1
+
+# Run FastQC (for quiet: -q. Run both samples in parallel: -t 2)
+module load fastqc/0.11.7
+fastqc -t 2 -o $outdir1 $fastq_out1 $fastq_out2
+module unload fastqc
+
+echo "End FastQC"
+echo "Current time: $(date +%T)"
+
+# #############################################################################################################################################################  
+# Downsample files:
+echo "Begin downsampling files"
+
+# Module load:
+module load seqtk/1.3
+
+# Sample
+seqtk sample -s $dseed $fastq_out1 $downsample_reads > $fastq_down1
+seqtk sample -s $dseed $fastq_out2 $downsample_reads > $fastq_down2
+
+# Unload module:
+module unload seqtk
+
+# Check if file exists:
+if [[ ! -f ${fastq_down1} ]] ; then
+    echo "File "${fastq_down1}" is not there, aborting."
+    exit 2
+elif [[ ! -f ${fastq_down2} ]] ; then
+    echo "File "${fastq_down2}" is not there, aborting."
+    exit 2
+fi
+
+echo "Downsampled fastq file size:"
+stat --printf="%s \n" ${fastq_down1}
+echo "    "
+stat --printf="%s \n" ${fastq_down2}
+echo "    "
+echo "Lines in downsampled fastq:"
+wc -l ${fastq_down1}
+echo "    "
+wc -l ${fastq_down2}
+echo "    "
+# Expected reads based on number of lines:
+echo "Reads in downsampled fastq:"
+echo $(( $(wc -l < ${fastq_down1}) / ${lines_read} ))
+echo "    "
+echo $(( $(wc -l < ${fastq_down2}) / ${lines_read} ))
+echo "    "
+
+
+# Remove full files:
+rm $fastq_out1
+rm $fastq_out2
+
+echo "End Downsampling"
+echo "Current time: $(date +%T)"
+
+# ############################################################################################################################################################# 
+# Run FastQC on downsampled files:
+echo "Begin FastQC on downsampled files"
+
+# Directory where fastq files are
+in_dir1=${outdir_temp}
+# Output directory:
+outdir1=${outdir}fastqc_down/
+mkdir -p ${outdir1}
+
+# Run FastQC (for quiet: -q. Run both samples in parallel: -t 2)
+module load fastqc/0.11.7
+fastqc -t 2 -o ${outdir1} ${fastq_down1} ${fastq_down2}
+module unload fastqc
+
+echo "End FastQC on downsampled files"
+echo "Current time: $(date +%T)"
+
+# #############################################################################################################################################################  
+# Run trimming on downsampled fastq
+echo "Begin trimming"
+
+# TODO is trim log handled appropriately?
+
+# Do Trimming:
+module load trimmomatic/0.39
+# Minimum length 60, 2 seed mismatches, 30 palindrome clip threshold, 10 simple clip threshold, default 8 min adapter length, keep both reads TRUE
+# Could use -baseout ${outdir}${sample_names[$index]}.fastq.gz 
+if  $do_qc ; then
+	trimmomatic PE -threads ${threads_to_use} -trimlog ${outdir_temp}trim_log.txt ${fastq_down1} ${fastq_down2} $taskoutput1 $taskoutput1u $taskoutput2 $taskoutput2u ILLUMINACLIP:${adapt}:2:30:10:8:keepBothReads MINLEN:60 LEADING:18 TRAILING:18
+else
+	trimmomatic PE -threads ${threads_to_use} -trimlog ${outdir_temp}trim_log.txt ${fastq_down1} ${fastq_down2} $taskoutput1 $taskoutput1u $taskoutput2 $taskoutput2u ILLUMINACLIP:${adapt}:2:30:10:8:keepBothReads MINLEN:60
+fi
+module unload trimmomatic
+
+# File sizes:
+the_files=(
+${taskoutput1}
+${taskoutput2}
+${taskoutput1u}
+${taskoutput2u}
+)
+
+echo "File sizes after trimming:"
+for f in "${the_files[@]}"
+do
+    echo "File: "${f}
+    echo "Size:"
+	stat --printf="%s \n" $f
+    echo "    "
+    # TODO is this working?
+    echo "Lines:"
+    wc -l ${f}
+    echo "    "
+    # Expected reads based on number of lines:
+    echo "Expected reads:"
+    echo $(( $(wc -l < ${f}) / ${lines_read} ))
+    echo "    "
+done
+
+# Check if file exists:
+if [[ ! -f ${taskoutput1} ]] ; then
+    echo "File "${taskoutput1}" is not there, aborting."
+    exit 2
+elif [[ ! -f ${taskoutput2} ]] ; then
+    echo "File "${taskoutput2}" is not there, aborting."
+    exit 2
+fi
+
+# Remove downsampled files:
+rm ${fastq_down1}
+rm ${fastq_down2}
+
+echo "End trimming"
+echo "Current time: $(date +%T)"
+
+# ############################################################################################################################################################# 
+# Run FastQC on trimmed files:
+echo "Begin FastQC on trimmed files"
+ 
+# Directory where fastq files are
+in_dir1=${outdir_temp}
+# Output directory:
+outdir1=${outdir}fastqc_trim/
+outdirTrash=${outdir}fastqc_trimUnpairedTrashed/
+mkdir -p $outdir1
+mkdir -p $outdirTrash
+
+# Run FastQC (for quiet: -q. Run both samples in parallel: -t 2)
+module load fastqc/0.11.7
+fastqc -t 2 -o $outdir1 ${taskoutput1} ${taskoutput2}
+fastqc -t 2 -o $outdirTrash ${taskoutput1u} ${taskoutput2u}
+module unload fastqc
+
+# Remove Un-paired files:
+rm $taskoutput1u
+rm $taskoutput2u
+
+echo "End FastQC on trimmed files"
+echo "Current time: $(date +%T)"
+# ############################################################################################################################################################# 
+# Rename files:
+
+echo "Filenames before rename: "
+echo ${taskoutput1}
+echo ${taskoutput2}
+echo "Filenames after rename: "
+echo ${renamed1}
+echo ${renamed2}
+
+# Move files:
+mv ${taskoutput1} ${renamed1}
+mv ${taskoutput2} ${renamed2}
+
+# Check if file exists:
+if [[ ! -f ${renamed1} ]] ; then
+    echo "File "${renamed1}" is not there, aborting."
+    exit 2
+elif [[ ! -f ${renamed2} ]] ; then
+    echo "File "${renamed2}" is not there, aborting."
+    exit 2
+fi
+
+echo "End Sample Pre-processing"
+echo "Current time: $(date +%T)"
+# ############################################################################################################################################################# 
+# Run MiXCR:
+
+echo "Running MiXCR job ${JOB_ID} ; Task: ${SGE_TASK_ID}"
+echo "Started: $(date +%F)"
+echo "Current time: $(date +%T)"
+echo "Running in directory: $PWD"
+
+# Load module:
+module load mixcr/3.0.13
+
+echo "MiXCR version:"
+mixcr -v
+
+# Note: for earlier versions of MiXCR, specify align -t 8 and assemble -t 8
+for chain in "${chains[@]}"
+do 
+    echo "Chain: "${chain}
+    echo "Current time: $(date +%T)"
+	# Run MiXCR
+	mixcr analyze shotgun \
+			--species hs \
+			--starting-material rna \
+			--threads ${threads_to_use} \
+			--align "-OsaveOriginalReads=true" \
+			--receptor-type ${chain} \
+			--contig-assembly \
+			--only-productive \
+			--assemble "-OaddReadsCountOnClustering=true" \
+			--report ${mixcr_output}"."${chain}".report" \
+			${renamed1} ${renamed2} ${mixcr_output}"."${chain}
+	# Export clones differently
+	mixcr exportClones --filter-out-of-frames --filter-stops --with-spaces --preset full ${mixcr_output}"."${chain}.contigs.clns ${mixcr_output}"."${chain}".BCR".myExport.Clns.txt
+	mixcr exportClones --filter-out-of-frames --filter-stops --with-spaces --preset-file $options_file ${mixcr_output}"."${chain}.contigs.clns ${mixcr_output}"."${chain}".BCR".custom.myExport.Clns.txt
+	for c1 in "${chainsB[@]}"
+	do 
+		echo "Current time: $(date +%T)"
+        echo "Individual chains: "${c1}
+		mixcr exportClones --filter-out-of-frames --filter-stops --with-spaces --preset full -c $c1 ${mixcr_output}"."${chain}.contigs.clns ${mixcr_output}"."${chain}"."${c1}.myExport.Clns.txt
+		mixcr exportClones --filter-out-of-frames --filter-stops --with-spaces --preset-file $options_file -c $c1 ${mixcr_output}"."${chain}.contigs.clns ${mixcr_output}"."${chain}"."${c1}.custom.myExport.Clns.txt
+	done
+done
+
+# Unload module:
+module unload mixcr
+
+echo "Time at End of MiXCR: $(date +%T)"
+
+# Check if a MiXCR post overlaps file exists:
+if [[ ! -f ${mixcr_clns} ]] ; then
+    echo "MiXCR FAILED!!!! File "${mixcr_clns}" is not there, aborting."
+    exit 4
+fi
+# Check if a MiXCR light chain file exists:
+if [[ ! -f ${mixcr_light_igk} ]] || [[ ! -f ${mixcr_light_igl} ]] ; then
+    echo "MiXCR FAILED!!!! Neighther File "${mixcr_light_igk}" or "${mixcr_light_igl}" exists, aborting."
+    exit 4
+fi
+
+
+# #############################################################################################################################################################  
+echo "Job finished: $(date +%F)"
+echo "Current time: $(date +%T)"

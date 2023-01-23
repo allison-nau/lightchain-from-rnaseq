@@ -1,0 +1,425 @@
+#!/bin/bash -l
+set -vx
+
+# This script controls post MiXCR main summarization steps, up to running IMGT. Exact steps run are controlled by boolean statements under "Global variables".
+
+
+echo "MultiQC, Combine MiXCR results, MiXCR stats"
+echo "Running job $JOB_ID"
+echo "Started: $(date +%F)"
+echo "Current time: $(date +%T)"
+echo "Running in directory: $PWD"
+
+# TODO: put some documentation here and in each script for function calls
+
+# #############################################################################################################################################################
+# Global variables - CHANGE DIRECTORY LOCATIONS, script locations, desired scripts to run as appropriate. 
+# CAP3 must be installed prior to running, and installation location specified in "cap3_program"
+
+# Directory where results are:
+in_dir=sra/800MiXCR/
+# Directory to output files:
+out_dir=${in_dir}SUMMARY/
+# Directory to store unrestricted large files:
+out_dir_norestrict=MMRF_MiXCR/
+
+# FastQC results are in (full file, downsampled file, trimmed file, trimmed unpaired trashed files):
+# These should all be subdirectories of in_dir
+fast_results=(
+fastqc_full
+fastqc_down
+fastqc_trim
+fastqc_trimUnpairedTrashed
+)
+
+# Program locations:
+cap3_prog=tools/cap3/CAP3/cap3
+
+# Script locations:
+# To Combine MiXCR results:
+combine_mixcr_script=pipeline/combine_mixcr_results.py
+# To add simplified VJ gene information to output:
+vj_script=pipeline/addVJ.py
+# To look at run timings (this may not work on a non-SGE cluster):
+timeaccounting_script=pipeline/timeaccounting.py
+# To further process standard output files:
+stdout_script=pipeline/stdout.py
+# Quick look at MiXCR results:
+mixcr_ratio_script=pipeline/mixcr_ratio_pipeline.R
+# MiXCR timing results (plus some MultiQC vs MiXCR results):
+timing_R_script=pipeline/pipeline_timings.R
+# Temporary fasta file script (for making msa and BLAST):
+fasta_script=pipeline/create_fasta.py
+# Create germline fasta files:
+fasta_germline_script=pipeline/create_fasta_germline.R
+# Pairwise blast script:
+blast_script=pipeline/blastpair.py
+# MSA script:
+# REMOVED
+# CAP3 assembly script:
+cap3_script=pipeline/cap3_top2.sh
+# CAP3 combine results into master fasta file script:
+cap3_combine_script=pipeline/combine_cap3_fasta.py
+# Blast against germline script:
+blast_germ_script=pipeline/blastpair_germline.py
+# CAP3 contig BLAST script:
+blast_contig_germ_script=pipeline/blastpair_contig_germline.py
+# Post BLAST script:
+post_blast_script=pipeline/postblast.R
+# Categorization script:
+categorization_script=pipeline/categorize.R
+# Generate final table: 
+# REMOVED - IMGT steps must be run first
+
+# Grab job summary from this many days:
+days=14
+
+# IMGT reference files: 
+# (Note these were made using imgtFASTAtoCSV.py)
+imgt_ref=IMGTref.csv
+imgt_leader_ref=IMGTleadersequences.csv
+
+# What steps to run. Note: some steps require the proceeding steps. 
+do_multiqc=true
+do_mixcrcombine=true
+do_addvj=true # Add VJ column to combined mixcr results
+do_jobaccounting=false  # May not work on non-SGE cluster
+do_standardoutput=false  # May not work on non-SGE cluster
+do_rsummary=true  # MiXCR ratio & timings 
+do_blast=true  # Produces fasta files and pairwise blast results
+do_cap3_fasta3=true # Produces FASTA files the contain no more than the top 2 ranked clones per chain (provided they are frequent enough), CAP3, combined fasta 
+do_germ_blast=true  # Blast against germline (files are specific for each sample)
+do_germ_contig_blast=true # Blast contigs from CAP3 against germline (files are specific for each sample)
+do_post_blast_processing=true  # Post BLAST processing & Categorization
+do_gzip_clna_vdjca=false  # gzip large MiXCR files and move
+
+# #############################################################################################################################################################
+# Set up (do NOT change variables below this line):
+
+# Save job summary to:
+accounting=${out_dir}"accounting.txt"
+# Job accounting saved to:
+jobaccount_csv=${out_dir}"job_account.csv"
+# Save standard output to:
+stdout=${out_dir}"select_standardoutput.txt"
+# Save unrestricted wide format standard output to (for use in R scripts):
+stdout_unrestricted=${out_dir}"processed_stdout_qc_wide_NOTrestricted.csv"
+# Save combined BLAST results to:
+blast_results=${out_dir}"blast_results.csv"
+# Save germline BLAST results to:
+blast_germ_results=${out_dir}"blast_germ_results.csv"
+# Save contig germline BLAST results to:
+blast_cap3_germ_results=${out_dir}"blast_cap3_germ_results.csv"
+# Combined MiXCR stats + top clones + BLAST expected to be save to:
+stats_top_blast_results=${out_dir}"mixcrstats_topclones_blast_combined.txt"
+
+# Save printing output from BLAST to:  NOT CURRENTLY BEING USED!!!
+# blast_stdout=${out_dir}"blast_print.txt"
+
+# MultiQC summary text file expected to be saved in:
+multiqc_textout=${out_dir}"multiqc_report_fastqc_trim_data/multiqc_fastqc.txt"
+
+# Directory to output files, temporarily:
+outdir_temp=${TMPDIR}/800gmpr/
+# Directory to move gzip clna files:
+clna_dir=${out_dir_norestrict}clna/
+# Directory to move gzip vdjca files:
+vdjca_dir=${out_dir_norestrict}vdjca/
+# Directory to store FASTA files representing MiXCR results:
+fasta_dir=${out_dir}fasta/
+# Directory to store FASTA files representing MiXCR results including combined targetted sequences line:
+fasta_dir2=${out_dir}fasta_includes_combined/
+# Directory to store sample specific germline reference files:
+fasta_germ_dir=${out_dir}fasta_germline/
+# Directory to store FASTA files of MiXCR results, top 2 clones only:
+fasta_dir3=${out_dir}fasta_top2/
+# Directory to output msa files:
+msa_dir=${out_dir}msa/
+# Directory to move old msa files to:
+msaold_dir=${out_dir}msa_old/
+
+# Make directories:
+mkdir $out_dir
+mkdir $outdir_temp
+mkdir $clna_dir
+mkdir $vdjca_dir
+mkdir $fasta_dir
+mkdir $fasta_dir2
+mkdir $fasta_germ_dir
+mkdir $fasta_dir3
+mkdir $msaold_dir
+mkdir $msa_dir
+
+# Combine MiXCR file:
+# TODO check out all 3
+mixcr_combined=${out_dir}"mixcr_all_clonotypes_v0.txt"
+mixcr_over100=${out_dir}"mixcr_over_100_v0.txt"
+
+# Add VJ gene:
+mixcr_vj=${out_dir}"mixcr_over_100_v0_vj.txt"  # TODO edit everywhere
+
+# MiXCR ratio output csv (to be input into later steps):
+mixcr_ratio_csv=${out_dir}"mixcr_ratio.csv"
+# Samples to watch
+samples_to_watch=${out_dir}"samples_to_manually_check.txt"
+
+# CAP3 master assembly results:
+cap3_master_fasta=${out_dir}cap3_master.fasta
+# Top 2 master fasta file:
+top2_master_fasta=${out_dir}top2_master.fasta
+
+# Change permissions for cap3_top2.sh
+echo "Changing permissions for cap3_top2.sh to allow for execution by owner and group (chmod 754)"
+chmod 754 ${cap3_script}
+
+# Expected user:
+echo "Expected user:  "$USER
+echo "Temporary directory in scratch space: "${outdir_temp}
+echo "Final summary output directory: "${out_dir}
+
+# #############################################################################################################################################################
+# Run MultiQC
+
+if  $do_multiqc ; then
+	echo "Running MultiQC"
+
+    # TODO: probably should have old multiqc reports removed?
+
+    # Load modules:
+    module load python3/3.7.9
+    module load multiqc/1.10.1
+
+    for f in "${fast_results[@]}"
+    do
+        echo "Current time: $(date +%T)"
+        input1=${in_dir}${f}/
+        output1=${out_dir}"multiqc_report_"${f}".html"
+        # Not necessary if use -f option in multiqc:
+        # If report already exists, remove:
+        #  if [[ -f ${output1} ]] ; then
+        #      rm ${output1}
+        #      rm -rf ${out_dir}"multiqc_report_"${f}
+        #  fi
+        echo "Running MultiQC in:  "${input1}
+        echo "Report will be saved in:  "${output1}
+        multiqc -f -n ${output1} ${input1}
+    done
+
+    # Unload modules:
+    module unload multiqc
+    module unload python3
+
+    echo "Finished MultiQC. Current time: $(date +%T)"
+fi
+
+
+# #############################################################################################################################################################
+# Combine MiXCR results:
+
+if $do_mixcrcombine ; then
+    echo "Combining MiXCR results"
+
+    module load python3/3.8.10
+    # (python script to combine all MiXCR results together) (directory where each samples MiXCR results are stored in) (directory to output files to)
+    python3 ${combine_mixcr_script} ${in_dir} ${out_dir}
+    module unload python3
+
+    echo "Finished Combining MiXCR. Current time: $(date +%T)"
+fi
+# #############################################################################################################################################################
+# Add VJ gene information to MiXCR results:
+# (Note this is done with only clones with at least 100 count because otherwise it takes too long.)
+
+if $do_addvj ; then
+
+    echo "Adding simplified V J gene columns to MiXCR results"
+
+    module load python3/3.8.10
+    # (Python script to add VJ results) (combined mixcr results file) (file to output results to)
+    python3 ${vj_script} ${mixcr_over100} ${mixcr_vj}
+    module unload python 3
+
+    echo "Finished adding simplified V J columns. Current time: $(date +%T)"
+fi
+
+# #############################################################################################################################################################
+# Get job accounting information:
+
+if $do_jobaccounting ; then
+    echo "Get job accounting:"
+    qacct -o $USER -j -d $days > $accounting
+    # Save a copy to makes sure not lost when files are combined together:
+    now=$(date +%Y-%m-%d.%H:%M)
+    cp ${accounting} ${out_dir}"accounting_"${now}".txt"
+
+    # Create time accounting csv:
+    module load python3/3.8.10
+    # (script) (username) (location of accounting.txt file made using qacct) (directory to output files to)
+    python3 ${timeaccounting_script} ${USER} ${accounting} ${out_dir}
+    module unload python3
+
+    echo "End Accounting. Current time: $(date +%T)"
+fi
+
+# #############################################################################################################################################################
+# Get select standard output:
+
+if $do_standardoutput ; then
+    echo "Get Select standard output:"
+
+    # Grab lines from standard output:
+    grep -s "max.*MatchesLimitReached" * > $stdout
+    grep -s "^Download sample: SRR" * >> $stdout
+    grep -s "^Before MiXCR, file name will be changed to:" * >> $stdout
+
+    # Convert to a more usable format, with a version without restricted information procuded:
+    module load python3/3.8.10
+    # (standard ouput processing python script) (standard output text file made using grep) (text file aggregated fastqc results produced by multiqc) (directory to output files to)
+    python3 ${stdout_script} ${stdout} ${multiqc_textout} ${out_dir}
+    module unload python3
+
+    echo "End select standard output. Current time: $(date +%T)"
+fi
+
+# TODO: need to add in top VJ gene before BLAST steps
+
+# #############################################################################################################################################################
+# R summarizing
+
+if $do_rsummary ;  then
+    echo "Start to produce figures in R"
+    module load R/4.0.5
+    echo "Being MiXCR ratio and figures"
+    # (MiXCR R script calculating ratios and other statitics) (giant mixcr combined tsv file) (location of accounting.txt file made using qacct) (directory to output results to)
+    Rscript --vanilla ${mixcr_ratio_script} ${mixcr_combined} ${accounting} ${out_dir}
+    echo "Begin R timing"
+    # (R script looking at timings from pipeline) (CSV with MiXCR ratio and stats made using R) (location of standardout produced using grep and processed using python, 
+    # leaving off column with original filenames) (directory to output files to)
+    Rscript --vanilla ${timing_R_script} ${mixcr_ratio_csv} ${jobaccount_csv} ${stdout_unrestricted} ${out_dir}
+    module unload R
+    echo "End R summarizing: MiXCR ratio and timing figures. Current time: $(date +%T)"
+fi
+
+
+# #############################################################################################################################################################
+# Blast & Fasta
+# (Note: the mixcr_vj file only has clones over 100. The shortened VJ information information is used for naming the BLAST clones currently, 
+# but if that is adjusted then you could go back to using the full MiXCR file. (Note: doing BLAST on full MiXCR results may be slow))
+
+if $do_blast ; then
+    echo "Begin producing FASTA files & pairwise BLAST"
+    echo "Produce temporary sample sequence fasta files:"
+    module load python3/3.8.10
+    # (python script to produce fasta files temporarily) (giant mixcr combined tsv file; this one is using >=100 count) (directory to store fasta files to) (boolean specifying top 2 only)
+    # TODO is this working as expected after top 2 boolean update?
+    python3 ${fasta_script} ${mixcr_vj} ${fasta_dir} False
+    module unload python
+    echo "End temporary sample sequence FASTA creation. Current time: $(date +%T)"
+    echo "Begin pairwise BLAST:"
+    module load python3/3.8.10
+    # (python scripts for blast results) (directory fasta files are in) (output csv to store results in)
+    python3 ${blast_script} ${fasta_dir} ${blast_results}
+    module unload python
+    echo "End BLAST. Current time: $(date +%T)"
+fi
+
+# #############################################################################################################################################################
+# fasta with no more than top 2 ranked clones, CAP3 assembly
+
+if $do_cap3_fasta3 ; then
+    echo "Begin producing FASTA files including line with no more than top 2 ranked clones per chain"
+    echo "Produce temporary fasta files:"
+    module load python3/3.8.10
+    # (python script to produce fasta files temporarily) (giant mixcr combined tsv file; this one is using >=100 count) (directory to store fasta files to) (boolean specifying top 2 only) (boolean specifying shorter names)
+    python3 ${fasta_script} ${mixcr_vj} ${fasta_dir3} True True
+    echo "End FASTA creating. Current time: $(date +%T)"
+    echo "Begin creating a combined FASTA file of top 2 clones for all samples"
+    cat ${fasta_dir3}*.fasta > ${top2_master_fasta}
+    echo "End combining all top2 fasta files into a master file. Current time: $(date +%T)"
+    echo "Begin CAP3 assembly"
+    $cap3_script $cap3_prog ${fasta_dir3}
+    echo "End CAP3 assembly. Current time: $(date +%T)"
+    echo "Begin combining CAP3 fasta results into a master FASTA file"
+    # TODO this doesn't work correctly  cat ${fasta_dir3}*.fasta.cap.contigs > ${cap3_master_fasta}
+    # (directory fasta files are in) (output fasta file to store results in)
+    python3 ${cap3_combine_script} ${fasta_dir3} ${cap3_master_fasta}
+    module unload python
+    echo "End combining all CAP3 contig files into a master file. Current time: $(date +%T)"
+fi
+
+# #############################################################################################################################################################
+# Germline Blast & Fasta
+# (Note: the mixcr_vj file only has clones over 100. The shortened VJ information information is used for naming the BLAST clones currently, 
+# but if that is adjusted then you could go back to using the full MiXCR file. (Note: doing BLAST on full MiXCR results may be slow))
+
+if $do_germ_blast ; then
+    echo "Begin producing germline reference files"
+    module load R/4.0.5
+    # (Script for generating germline reference FASTA files) (CSV with MIXCR ratio) (sample fasta file location) (directory to output results to) (IMGT reference file, csv) (IMGT reference leader sequences, csv)
+    Rscript --vanilla  ${fasta_germline_script} ${mixcr_ratio_csv} ${fasta_dir} ${fasta_germ_dir} ${imgt_ref} ${imgt_leader_ref}
+    module unload R
+    echo "End germline FASTA creation. Current time: $(date +%T)"
+    # TODO  echo "Begin producing FASTA files & pairwise BLAST"
+    # TODO  echo "Produce temporary fasta files:"
+    module load python3/3.8.10
+    # TODO  # (python script to produce fasta files temporarily) (giant mixcr combined tsv file; this one is using >=100 count) (directory to store fasta files to)
+    # TODO  python3 ${fasta_script} ${mixcr_vj} ${fasta_dir}
+    # TODO  echo "End FASTA creating. Current time: $(date +%T)"
+    echo "Begin germline pairwise BLAST:"
+    # (directory mixcr sample fasta files are in) (directory germline files are in) (output csv to store results in)
+    python3 ${blast_germ_script} ${fasta_dir} ${fasta_germ_dir} ${blast_germ_results}
+    module unload python
+    echo "End germline BLAST. Current time: $(date +%T)"
+fi
+
+
+# #############################################################################################################################################################
+# CAP3 contig Germline Blast & Fasta
+
+if $do_germ_contig_blast ; then
+    # TODO  echo "Begin producing FASTA files & pairwise BLAST"
+    # TODO  echo "Produce temporary fasta files:"
+    module load python3/3.8.10
+    # TODO  # (python script to produce fasta files temporarily) (giant mixcr combined tsv file; this one is using >=100 count) (directory to store fasta files to)
+    # TODO  python3 ${fasta_script} ${mixcr_vj} ${fasta_dir}
+    # TODO  echo "End FASTA creating. Current time: $(date +%T)"
+    echo "Begin CAP3 contig germline pairwise BLAST:"
+    # (directory CAP3 results are in) (directory germline files are in) (output csv to store results in)
+    # TODO switch back to variable
+    # python3 ${blast_contig_germ_script} ${fasta_dir3} ${fasta_germ_dir} ${blast_cap3_germ_results}
+    python3 ${blast_contig_germ_script} ${fasta_dir3} ${fasta_germ_dir} ${blast_cap3_germ_results}
+    module unload python
+    echo "End contig germline BLAST. Current time: $(date +%T)"
+fi
+
+# #############################################################################################################################################################
+# Post BLAST processing & Categorization:
+if $do_post_blast_processing ; then
+    echo "Begin post BLAST processing"
+    module load R/4.0.5
+    # (R script to run post blast processing) (CSV with MiXCR ratio and stats made using R) (full mixcr results) (blast results) (output directory)
+    Rscript --vanilla ${post_blast_script} ${mixcr_ratio_csv} ${mixcr_combined} ${blast_results} ${out_dir}
+    echo "End post BLAST processing. Current time: $(date +%T)"
+    echo "Begin categorization"
+    # (R script to run categorization) (mixcrstats_topclones_blast_combined.txt) (output directory)
+    Rscript --vanilla ${categorization_script} ${stats_top_blast_results} ${out_dir}
+    echo "End Categorization. Current time: $(date +%T)"
+    module unload R
+fi
+
+# ############################################################################################################################################################
+# Gzip all clna and vdjca files, then move to subfolders
+
+
+if $do_gzip_clna_vdjca ; then
+    # Gzip the applicable files:
+    gzip -v ${in_dir}*".clna"
+    gzip -v ${in_dir}*".vdjca"
+    # Move the applicable files:
+    mv ${in_dir}*".clna.gz" ${clna_dir}
+    mv ${in_dir}*".vdjca.gz" ${vdjca_dir}
+    echo "End gzip and moving clna and vdjca files. Current time: $(date +%T)"
+fi
+
+# ############################################################################################################################################################
+echo "End pipeline_summary_qc.qsub. Current time: $(date +%T)"
