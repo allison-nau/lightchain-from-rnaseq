@@ -45,14 +45,15 @@ Notes:
     
     
 ## This program requires the following tools to be installed/available:  
-Requirements for "pipeline.qsub":  
+Requirements for "pipeline.qsub":   
 - python3/3.8.10
 - sratoolkit/2.11.1
 - fastqc/0.11.7
 - seqtk/1.3
 - trimmomatic/0.39
 - mixcr/3.0.13
-Requirements for "pipeline_summary_qc.qsub":  
+   
+Requirements for "pipeline_summary_qc.qsub":   
 - python3/3.8.10 (main python version)
     - Packages: 
         - [Bio](https://biopython.org/docs/1.75/api/index.html)
@@ -70,8 +71,9 @@ Requirements for "pipeline_summary_qc.qsub":
         - tidyverse, ggpubr, ggplot2, GGally, janitor, naniar
 - CAP3 executable
     - ([Huang et al 1999](https://pubmed.ncbi.nlm.nih.gov/10508846/))
-    - Location should be specified in the variable "cap3_prog" in "pipeline_summary_qc.qsub"
-Additional requirements not listed above:
+    - Location should be specified in the variable "cap3_prog" in "pipeline_summary_qc.qsub"  
+   
+Additional requirements not listed above:  
 - R/4.0.5
     - Libraries:
         - stringi, forcats
