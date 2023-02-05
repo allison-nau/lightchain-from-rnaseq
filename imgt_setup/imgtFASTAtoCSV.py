@@ -13,7 +13,7 @@ import sys
 from Bio import SeqIO
 
 # Globals:
-do_leader = True
+# do_leader = True
 do_leader = False
 
 if not do_leader:
